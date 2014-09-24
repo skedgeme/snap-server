@@ -126,17 +126,17 @@ data ServerState = ServerState
     { _forceConnectionClose :: Bool
     , _localHostname        :: ByteString
     , _sessionPort          :: SessionInfo
-    , _logAccess            :: Request -> Response -> IO ()
+    , _logAccess            :: Request -> Response -> NominalDiffTime -> IO ()
     , _logError             :: ByteString -> IO ()
     }
 
 
 ------------------------------------------------------------------------------
-runServerMonad :: ByteString                     -- ^ local host name
-               -> SessionInfo                    -- ^ session port information
-               -> (Request -> Response -> IO ()) -- ^ access log function
-               -> (ByteString -> IO ())          -- ^ error log function
-               -> ServerMonad a                  -- ^ monadic action to run
+runServerMonad :: ByteString                                -- ^ local host name
+               -> SessionInfo                               -- ^ session port information
+               -> (Request -> Response -> NominalDiffTime -> IO ()) -- ^ access log function
+               -> (ByteString -> IO ())                     -- ^ error log function
+               -> ServerMonad a                             -- ^ monadic action to run
                -> Iteratee ByteString IO a
 runServerMonad lh s la le m = evalStateT m st
   where
@@ -244,13 +244,13 @@ bshow = toBS . show
 
 
 ------------------------------------------------------------------------------
-logA :: Maybe (ByteString -> IO ()) -> Request -> Response -> IO ()
-logA alog = maybe (\_ _ -> return ()) logA' alog
+logA :: Maybe (ByteString -> IO ()) -> Request -> Response -> NominalDiffTime -> IO ()
+logA alog = maybe (\_ _ _-> return ()) logA' alog
 
 
 ------------------------------------------------------------------------------
-logA' :: (ByteString -> IO ()) -> Request -> Response -> IO ()
-logA' logger req rsp = do
+logA' :: (ByteString -> IO ()) -> Request -> Response -> NominalDiffTime -> IO ()
+logA' logger req rsp dt = do
     let hdrs      = rqHeaders req
     let host      = rqRemoteAddr req
     let user      = Nothing -- TODO we don't do authentication yet
@@ -264,7 +264,7 @@ logA' logger req rsp = do
     let userAgent = maybe "-" head $ H.lookup "user-agent" hdrs
 
     msg <- combinedLogEntry host user reql status cl referer userAgent
-    logger msg
+    logger (S.concat [msg, " %D:", bshow . (truncate :: NominalDiffTime -> Int64) . (*1000000) $ dt])
 
 
 ------------------------------------------------------------------------------
@@ -348,8 +348,8 @@ snapServerVersion = SC.pack $ showVersion $ V.version
 
 
 ------------------------------------------------------------------------------
-logAccess :: Request -> Response -> ServerMonad ()
-logAccess req rsp = gets _logAccess >>= (\l -> liftIO $ l req rsp)
+logAccess :: Request -> Response -> NominalDiffTime -> ServerMonad ()
+logAccess req rsp dt = gets _logAccess >>= (\l -> liftIO $ l req rsp dt)
 
 
 ------------------------------------------------------------------------------
@@ -389,13 +389,13 @@ httpSession defaultTimeout writeEnd' buffer onSendFile tickle handler = do
           checkExpect100Continue req writeEnd
 
           logerr <- gets _logError
-
+          t0 <- liftIO getCurrentTime
           (req',rspOrig) <- (lift $ handler logerr tickle req)
               `CatchIO.catches`
                   [ CatchIO.Handler $ escapeHttpCatch
                   , CatchIO.Handler $ errCatch "user handler" req
                   ]
-
+          t1 <- liftIO getCurrentTime
           debug $ "Server.httpSession: finished running user handler"
 
           let rspTmp = rspOrig { rspHttpVersion = rqVersion req }
@@ -441,6 +441,7 @@ httpSession defaultTimeout writeEnd' buffer onSendFile tickle handler = do
           maybe (logAccess req rsp')
                 (\_ -> logAccess req $ setContentLength bytesSent rsp')
                 (rspContentLength rsp')
+                (diffUTCTime t0 t1)
 
           if cc
              then do
