@@ -441,7 +441,7 @@ httpSession defaultTimeout writeEnd' buffer onSendFile tickle handler = do
           maybe (logAccess req rsp')
                 (\_ -> logAccess req $ setContentLength bytesSent rsp')
                 (rspContentLength rsp')
-                (diffUTCTime t0 t1)
+                (diffUTCTime t1 t0)
 
           if cc
              then do
